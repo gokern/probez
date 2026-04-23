@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    - gci
+    - golines
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofmt:
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+        - pattern: "a[b:len(a)]"
+          replacement: "a[b:]"
+
+linters:
+  default: all
+  disable:
+    - wsl # Deprecated, replaced by wsl_v5.
+    - exhaustruct # Too noisy for stdlib structs like http.Server.
+    - noctx # Tests and examples use http.Get/httptest.NewRequest intentionally.
+    - tagliatelle # snake_case JSON field names are intentional.
+    - testpackage # Internal tests need access to unexported symbols.
+  settings:
+    depguard:
+      rules:
+        main:
+          allow:
+            - $gostd
+            - github.com/gokern/probez
+            - github.com/stretchr/testify
+    varnamelen:
+      ignore-names:
+        - i
+        - fn
+        - p # probe
+      ignore-decls:
+        - w http.ResponseWriter
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - err113
+          - funlen
