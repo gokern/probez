@@ -35,7 +35,6 @@ jobs:
           # linter deprecation under `default: all`). Bump this on purpose,
           # together with any config/code changes the new version demands.
           version: v2.12.2
-          args: --timeout=5m
 
   tidy:
     name: go mod tidy
