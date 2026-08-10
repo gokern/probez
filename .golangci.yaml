@@ -25,6 +25,7 @@ linters:
   default: all
   disable:
     - wsl # Deprecated, replaced by wsl_v5.
+    - gomodguard # Deprecated, replaced by gomodguard_v2.
     - exhaustruct # Too noisy for stdlib structs like http.Server.
     - noctx # Tests and examples use http.Get/httptest.NewRequest intentionally.
     - tagliatelle # snake_case JSON field names are intentional.

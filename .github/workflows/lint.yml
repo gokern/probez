@@ -30,7 +30,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned deliberately: `latest` makes every upstream golangci-lint
+          # release able to turn CI red on an untouched tree (a new check, or a
+          # linter deprecation under `default: all`). Bump this on purpose,
+          # together with any config/code changes the new version demands.
+          version: v2.12.2
           args: --timeout=5m
 
   tidy:
