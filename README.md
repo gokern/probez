@@ -4,7 +4,6 @@
 [![Lint](https://github.com/gokern/probez/actions/workflows/lint.yml/badge.svg)](https://github.com/gokern/probez/actions/workflows/lint.yml)
 [![CodeQL](https://github.com/gokern/probez/actions/workflows/codeql.yml/badge.svg)](https://github.com/gokern/probez/actions/workflows/codeql.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/gokern/probez.svg)](https://pkg.go.dev/github.com/gokern/probez)
-[![Go Report Card](https://goreportcard.com/badge/github.com/gokern/probez)](https://goreportcard.com/report/github.com/gokern/probez)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/gokern/probez)](go.mod)
 [![Release](https://img.shields.io/github/v/release/gokern/probez?include_prereleases&sort=semver)](https://github.com/gokern/probez/releases)
 [![License](https://img.shields.io/github/license/gokern/probez)](LICENSE)
