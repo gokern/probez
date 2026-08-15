@@ -204,6 +204,181 @@ func TestAutoLive(t *testing.T) {
 	})
 }
 
+func TestLivenessCheck(t *testing.T) {
+	t.Parallel()
+
+	livez := func(p *Probe) int {
+		rec := httptest.NewRecorder()
+		p.handleLivez(rec, httptest.NewRequest(http.MethodGet, "/livez", nil))
+
+		return rec.Code
+	}
+
+	t.Run("passing_check_keeps_livez_200", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool { return true }))
+		p.MarkStarted()
+
+		require.Equal(t, http.StatusOK, livez(p))
+	})
+
+	t.Run("failing_check_takes_livez_to_503", func(t *testing.T) {
+		t.Parallel()
+
+		live := true
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool { return live }))
+		p.MarkStarted()
+
+		require.Equal(t, http.StatusOK, livez(p))
+
+		live = false
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+	})
+
+	t.Run("check_outranks_autolive", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool { return false }))
+		p.MarkStarted()
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+	})
+
+	t.Run("check_outranks_a_fresh_heartbeat", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0, WithLivenessCheck("wd", func() bool { return false }))
+		p.MarkStarted()
+		p.Ping()
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+	})
+
+	t.Run("every_check_must_pass", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0,
+			WithAutoLive(),
+			WithLivenessCheck("first", func() bool { return true }),
+			WithLivenessCheck("second", func() bool { return false }),
+		)
+		p.MarkStarted()
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+	})
+
+	// Consulting a check this early would ask a watchdog that is not armed yet.
+	t.Run("not_consulted_before_started", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool {
+			called = true
+
+			return true
+		}))
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+		require.False(t, called, "the state gate decides before any check runs")
+	})
+
+	t.Run("readyz_fails_while_a_liveness_check_fails", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool { return false }))
+		p.MarkStarted()
+		p.MarkReady()
+
+		rec := httptest.NewRecorder()
+		p.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+
+	t.Run("status_reports_each_check_by_name", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0,
+			WithAutoLive(),
+			WithLivenessCheck("healthy", func() bool { return true }),
+			WithLivenessCheck("wedged", func() bool { return false }),
+		)
+		p.MarkStarted()
+
+		rec := httptest.NewRecorder()
+		p.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body struct {
+			LivenessChecks map[string]bool `json:"liveness_checks"`
+		}
+
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+		require.Equal(t, map[string]bool{"healthy": true, "wedged": false}, body.LivenessChecks)
+	})
+
+	t.Run("status_omits_the_field_when_none_are_registered", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0)
+		p.MarkStarted()
+
+		rec := httptest.NewRecorder()
+		p.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+
+		var body map[string]any
+
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+		require.NotContains(t, body, "liveness_checks",
+			"a probe without checks reports the shape it always has")
+	})
+
+	// draining is still >= started, so the checks keep being consulted through a
+	// drain. That is deliberate and documented, and gating it would look like a
+	// tidy fix for a healthy shutdown reporting itself as a restart.
+	t.Run("still_consulted_while_draining", func(t *testing.T) {
+		t.Parallel()
+
+		live := true
+		p := newProbe(0, WithAutoLive(), WithLivenessCheck("wd", func() bool { return live }))
+		p.MarkStarted()
+		p.MarkReady()
+		p.Shutdown()
+
+		require.Equal(t, http.StatusOK, livez(p), "draining alone does not fail liveness")
+
+		live = false
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+	})
+
+	// Nothing stops two checks from sharing a name, and the map in /status has
+	// one slot per name to report them in.
+	t.Run("status_folds_checks_that_share_a_name", func(t *testing.T) {
+		t.Parallel()
+
+		p := newProbe(0,
+			WithAutoLive(),
+			WithLivenessCheck("wd", func() bool { return false }),
+			WithLivenessCheck("wd", func() bool { return true }),
+		)
+		p.MarkStarted()
+
+		require.Equal(t, http.StatusServiceUnavailable, livez(p))
+
+		rec := httptest.NewRecorder()
+		p.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+
+		var body struct {
+			LivenessChecks map[string]bool `json:"liveness_checks"`
+		}
+
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+		require.Equal(t, map[string]bool{"wd": false}, body.LivenessChecks)
+	})
+}
+
 func TestHandleReadyz(t *testing.T) {
 	t.Parallel()
 

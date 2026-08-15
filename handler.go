@@ -50,16 +50,37 @@ func (p *Probe) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		heartbeatAgeMs = -1 // no ping yet
 	}
 
+	// Left nil when nothing is registered, so a probe without checks reports
+	// the shape it always has.
+	var livenessChecks map[string]bool
+
+	if len(p.livenessChecks) > 0 {
+		livenessChecks = make(map[string]bool, len(p.livenessChecks))
+
+		for _, check := range p.livenessChecks {
+			// Two checks may share a name, and the map has one slot per name.
+			// Fold with AND, as isLive does, rather than let the last one win.
+			ok := check.Check()
+			if prev, seen := livenessChecks[check.Name]; seen {
+				ok = ok && prev
+			}
+
+			livenessChecks[check.Name] = ok
+		}
+	}
+
 	resp := struct {
-		State          string `json:"state"`
-		UptimeMs       int64  `json:"uptime_ms"`
-		HeartbeatAgeMs int64  `json:"heartbeat_age_ms"`
-		StaleAfterMs   int64  `json:"stale_after_ms"`
+		State          string          `json:"state"`
+		UptimeMs       int64           `json:"uptime_ms"`
+		HeartbeatAgeMs int64           `json:"heartbeat_age_ms"`
+		StaleAfterMs   int64           `json:"stale_after_ms"`
+		LivenessChecks map[string]bool `json:"liveness_checks,omitempty"`
 	}{
 		State:          p.currentState().String(),
 		UptimeMs:       now.Sub(p.createdAt).Milliseconds(),
 		HeartbeatAgeMs: heartbeatAgeMs,
 		StaleAfterMs:   p.staleAfter.Milliseconds(),
+		LivenessChecks: livenessChecks,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
