@@ -51,21 +51,30 @@ type ReadinessCheck struct {
 	Check func(ctx context.Context) error
 }
 
+// LivenessCheck is a named predicate: true while the process is still working,
+// false to have it restarted. It runs on the goroutine serving the request and
+// must not block.
+type LivenessCheck struct {
+	Name  string
+	Check func() bool
+}
+
 // Probe tracks application lifecycle and serves health endpoints.
 type Probe struct {
 	state    atomic.Int32
 	lastPing atomic.Int64 // UnixNano
 
-	createdAt    time.Time
-	host         string
-	port         int
-	addr         string // resolved after Listen, used by Addr()
-	autoLive     bool
-	staleAfter   time.Duration
-	startupGrace time.Duration
-	logger       *slog.Logger
-	checks       []ReadinessCheck
-	server       *http.Server
+	createdAt      time.Time
+	host           string
+	port           int
+	addr           string // resolved after Listen, used by Addr()
+	autoLive       bool
+	staleAfter     time.Duration
+	startupGrace   time.Duration
+	logger         *slog.Logger
+	checks         []ReadinessCheck
+	livenessChecks []LivenessCheck
+	server         *http.Server
 }
 
 // Option configures a Probe.
@@ -105,6 +114,25 @@ func WithLogger(l *slog.Logger) Option {
 func WithReadinessCheck(name string, fn func(ctx context.Context) error) Option {
 	return func(p *Probe) {
 		p.checks = append(p.checks, ReadinessCheck{Name: name, Check: fn})
+	}
+}
+
+// WithLivenessCheck registers a predicate consulted on every liveness decision.
+// The process is live only while all of them return true, on top of whatever
+// the heartbeat already says.
+//
+// The predicate runs on more endpoints than the name suggests: /livez, /readyz
+// and /healthz through it, and /status, which reports each check by name. Keep
+// it to reading a value something else has already computed -- that is also why
+// it takes no context and returns no error. A liveness probe that consults a
+// dependency turns that dependency's outage into a restart of every replica at
+// once.
+//
+// Pair it with WithAutoLive unless the process also calls Ping. Otherwise the
+// heartbeat expires on its own schedule and delays what the check already knows.
+func WithLivenessCheck(name string, fn func() bool) Option {
+	return func(p *Probe) {
+		p.livenessChecks = append(p.livenessChecks, LivenessCheck{Name: name, Check: fn})
 	}
 }
 
@@ -231,10 +259,19 @@ func (p *Probe) currentState() state {
 	return state(p.state.Load())
 }
 
-// isLive checks liveness logic: state >= started AND (autoLive OR in grace OR heartbeat fresh).
+// isLive checks liveness logic: state >= started AND every registered check
+// AND (autoLive OR in grace OR heartbeat fresh).
 func (p *Probe) isLive() bool {
 	if p.currentState() < stateStarted {
 		return false
+	}
+
+	// A check that says the work has stopped outranks anything the process says
+	// about itself, autoLive included.
+	for _, c := range p.livenessChecks {
+		if !c.Check() {
+			return false
+		}
 	}
 
 	if p.autoLive {

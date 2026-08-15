@@ -142,6 +142,45 @@ func ExampleProbe_Ping() {
 	// processed: 6
 }
 
+// Liveness check that reports whether the work is still moving. On /livez every
+// registered predicate runs; a single false flips the response to 503, even
+// under WithAutoLive.
+func ExampleWithLivenessCheck() {
+	// Stands in for a watchdog: the check only reads a verdict computed
+	// elsewhere.
+	var working atomic.Bool
+
+	working.Store(true)
+
+	p, err := probez.New(0,
+		probez.WithHost("127.0.0.1"),
+		probez.WithAutoLive(),
+		probez.WithLivenessCheck("consumer", working.Load),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = p.Close(context.Background()) }()
+
+	p.MarkStarted()
+
+	resp, _ := http.Get("http://" + p.Addr() + "/livez")
+	_ = resp.Body.Close()
+	fmt.Println("working:", resp.StatusCode)
+
+	// The consumer wedges -- /livez asks for a restart even though the probe
+	// server is still answering.
+	working.Store(false)
+
+	resp, _ = http.Get("http://" + p.Addr() + "/livez")
+	_ = resp.Body.Close()
+	fmt.Println("wedged:", resp.StatusCode)
+	// Output:
+	// working: 200
+	// wedged: 503
+}
+
 // Readiness check that reports an external dependency's state. On /readyz
 // every registered check runs with the request context; any non-nil error
 // flips the response to 503.

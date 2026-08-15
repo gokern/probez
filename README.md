@@ -66,7 +66,7 @@ Runnable examples are in `example_test.go`. Everything else is in the [godoc](ht
 | `GET /livez` | Liveness probe | Heartbeat fresh | Heartbeat stale |
 | `GET /readyz` | Readiness probe | Ready for work | Not ready / draining |
 | `GET /healthz` | Alias for `/readyz` | — | — |
-| `GET /status` | Diagnostic JSON (always 200) | `{state, uptime_ms, heartbeat_age_ms, stale_after_ms}` | — |
+| `GET /status` | Diagnostic JSON (always 200) | `{state, uptime_ms, heartbeat_age_ms, stale_after_ms}`, plus `liveness_checks` when any are registered | — |
 
 ## State machine
 
@@ -87,6 +87,7 @@ Transitions are forward-only and atomic. Going back — from `ready` to `started
 | `WithStartupGrace(d)` | `60s` | Grace period: `/livez` returns 200 without `Ping()` |
 | `WithLogger(l)` | `slog.Default()` | `*slog.Logger` for lifecycle events |
 | `WithReadinessCheck(name, fn)` | none | `func(ctx context.Context) error` called on `/readyz` |
+| `WithLivenessCheck(name, fn)` | none | `func() bool` consulted by `/livez`, and by `/readyz` through it; false means restart me |
 
 ## Liveness modes
 
@@ -94,6 +95,42 @@ HTTP servers and background workers need different liveness signals. `probez` su
 
 - **Heartbeat (default).** Call `Ping()` from your main loop. `/livez` returns 200 while the last ping is newer than `WithStaleAfter` (default 30s). Fits background workers, queue consumers, and long-running loops: a stuck goroutine stops pinging and the orchestrator restarts the pod.
 - **Auto (`WithAutoLive()`).** `/livez` returns 200 as long as the state is `>= started`. The fact that the probe endpoint itself answered is treated as proof of life. Fits HTTP/gRPC servers where the request path is already the health signal.
+- **Checked (`WithLivenessCheck(name, fn)`).** `/livez` consults predicates you supply, on top of whichever mode above is in force. The process is live only while every check returns true; `/status` reports each by name, and `/readyz` fails along with them. The predicate takes no context and returns no error because it has to stay cheap and local: a liveness probe that reaches for a dependency turns that dependency's outage into a restart of every replica at once.
+
+### Several strands in one process
+
+A single heartbeat answers "is *anything* in this process still moving". Once a process runs a consumer, a scheduler and a handler pool at once, that is the wrong question — one strand wedges, the other two keep calling `Ping()`, and `/livez` stays green.
+
+[`watchdog`](https://github.com/gokern/watchdog) splits that bit into one per strand and reduces them with AND. Its `Live` method has exactly the signature this option takes, so it goes in with no adapter:
+
+```go
+w := watchdog.New()
+consumer := w.Track("invoice_consumer", watchdog.MaxSilence(45*time.Second))
+responder := w.Track("notify_responder", watchdog.NoStuckUnit(9*time.Second))
+w.Arm()
+
+if err := probez.Start(8002,
+    probez.WithAutoLive(),
+    probez.WithLivenessCheck("watchdog", w.Live),
+); err != nil {
+    log.Fatal(err)
+}
+probez.MarkStarted()
+```
+
+Each strand then proves its own progress by completing a unit of work:
+
+```go
+for msg := range queue {
+    consumer.Do(func() { handle(msg) })   // a self-driving loop, judged by its silence
+}
+
+responder.Do(func() { reply(rw, req) })   // driven from outside, judged by a stuck unit
+```
+
+`WithAutoLive()` is not decoration here. Without it the heartbeat keeps its own window, so a process that never calls `Ping()` goes 503 once `WithStartupGrace` runs out, whatever the watchdog says. Two windows in an AND, and the one that knows nothing is the one that decides.
+
+When `/livez` turns 503, `/status` names the check that failed, and the watchdog's own `Snapshot()` says which strand it was and how long it had been quiet.
 
 ## Shutdown behavior
 
@@ -104,6 +141,24 @@ HTTP servers and background workers need different liveness signals. `probez` su
 - The HTTP server keeps running until the process exits, or until you call `Close()` explicitly.
 
 `Close(ctx)` is the hard stop — it gracefully shuts down the probe's HTTP server.
+
+### Draining and liveness checks
+
+`draining` is still `>= started`, so liveness checks keep being consulted after `Shutdown()`.
+
+Any check that judges liveness by progress, a watchdog included, has a problem with that. During a drain the work is *meant* to wind down, and the check cannot tell that apart from a wedge: once the drain outlasts its window, a healthy shutdown reports itself as a process to restart.
+
+If yours cannot tell the two apart, let the predicate know the drain has started:
+
+```go
+probez.WithLivenessCheck("worker", func() bool {
+    return draining.Load() || worker.Progressing()
+})
+```
+
+Gating this way gives up catching a drain that wedges; not gating gives up drains longer than the window. The default is not gated.
+
+The heartbeat mode has no such problem: `Ping()` is only a timestamp, and `WithStaleAfter` is chosen against the drain, not against a unit of work.
 
 ## Docker healthcheck
 
