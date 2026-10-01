@@ -1,0 +1,42 @@
+# probez — local development tooling.
+#
+# The Go version is deliberately not pinned here: go.mod already declares the
+# minimum supported version and CI reads it. Everything go.mod cannot express
+# lives in [tools]. Bump these by hand — Dependabot does not read this file.
+
+[tools]
+golangci-lint = "2.14.0"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.8.0"
+
+[tasks.test]
+description = "Run the tests with the race detector and coverage"
+# Shuffled on purpose: the tests run in parallel and share state where they
+# do, so a fixed order is one arrangement of that, not a statement about
+# any other.
+run = "go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run ./..."
+
+[tasks.fmt]
+description = "Apply the formatters configured in .golangci.yaml"
+run = "golangci-lint fmt ./..."
+
+[tasks.tidy]
+description = "Check go.mod is tidy"
+# -diff is non-mutating and independent of the commit state: it exits
+# non-zero exactly when a tidy would change something.
+run = "go mod tidy -diff"
+
+[tasks.vuln]
+description = "Scan dependencies for known vulnerabilities"
+run = "govulncheck ./..."
+
+[tasks.check]
+description = "Everything CI runs before merge"
+# Sequential, not `depends`: mise runs dependencies in parallel, and a
+# suite that asserts on real elapsed time should not compete with lint and
+# govulncheck for the CPU. tidy runs before test so an untidy module fails
+# fast instead of after the slowest check.
+run = "mise run lint && mise run tidy && mise run test && mise run vuln"
